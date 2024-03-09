@@ -1,11 +1,13 @@
 import asyncHandler from '../middleware/asyncHandler.js';
 import Product from '../models/productModel.js';
+import OpenAI from "openai";
+
 
 // @desc    Fetch all products
 // @route   GET /api/products
 // @access  Public
 const getProducts = asyncHandler(async (req, res) => {
-  const pageSize = process.env.PAGINATION_LIMIT;
+  const pageSize = parseInt(process.env.PAGINATION_LIMIT) || 8; // 如果环境变量不存在，则默认为8
   const page = Number(req.query.pageNumber) || 1;
 
   const keyword = req.query.keyword
@@ -23,6 +25,82 @@ const getProducts = asyncHandler(async (req, res) => {
     .skip(pageSize * (page - 1));
 
   res.json({ products, page, pages: Math.ceil(count / pageSize) });
+});
+
+const getRecommendedProducts = asyncHandler(async (req, res) => {
+  const pageSize = parseInt(process.env.PAGINATION_LIMIT) || 8; // 如果环境变量不存在，则默认为8
+  const page = Number(req.query.pageNumber) || 1;
+
+  const products = await Product.find({});
+  if (!req.query.keyword) {
+    const keyword = req.query.keyword
+    ? {
+        name: {
+          $regex: req.query.keyword,
+          $options: 'i',
+        },
+      }
+    : {};
+
+    const count = await Product.countDocuments({ ...keyword });
+    const products = await Product.find({ ...keyword })
+      .limit(pageSize)
+      .skip(pageSize * (page - 1));
+
+    return res.json({ products, page, pages: Math.ceil(count / pageSize) });
+  }
+  
+  const userRequest = req.query.keyword;
+
+  // 构建产品列表文本，每个产品用分号隔开
+  const productsText = products.map(product => `${product.name}`).join("; ");
+  
+
+  try {
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+    // 使用chatCompletion端点发送请求
+    const response = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo", // 根据您的需求选择合适的模型
+      messages: [
+        {
+          role: "system",
+          content: "You are a helpful assistant. Given a user interest, recommend products by returning product names separated by semicolons (;). Do not include any extra text.",
+        },
+        {
+          role: "user",
+          content: `User interest: ${userRequest}. Products: ${productsText}. Based on the user interest, recommend products.`,
+        },
+      ],
+    });
+
+    // 提取GPT的响应，并使用分号分割产品名
+    const recommendedProductNames = response.choices[0].message.content.split(';').map(name => name.trim());
+
+    // 使用提取的产品名筛选出推荐的产品
+    const recommendedProducts = products.filter(product => recommendedProductNames.includes(product.name));
+
+    const totalProducts = recommendedProducts.length;
+    const pages = Math.ceil(totalProducts / pageSize);
+
+    // 计算当前页的产品子集的开始和结束索引
+    const startIndex = (page - 1) * pageSize;
+    const endIndex = startIndex + pageSize;
+
+    // 使用.slice方法选择当前页的产品
+    const paginatedProducts = recommendedProducts.slice(startIndex, endIndex);
+
+    // 返回分页信息和当前页的产品列表
+    return res.json({
+      products: paginatedProducts,
+      page: page,
+      pages: pages
+    });
+  } catch (error) {
+    console.error("Error calling OpenAI Chat API:", error);
+    throw new Error("Failed to get product recommendations.");
+  }
 });
 
 // @desc    Fetch single product
@@ -162,4 +240,5 @@ export {
   deleteProduct,
   createProductReview,
   getTopProducts,
+  getRecommendedProducts,
 };
